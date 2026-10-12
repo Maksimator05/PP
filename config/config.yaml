@@ -1,0 +1,44 @@
+project:
+  name: retail_category_weekly_forecast
+  random_seed: 42
+
+data:
+  source: synthetic
+  x5_path: data/raw/x5_retailhero
+  synthetic_path: data/raw/x5_retailhero_synthetic
+  processed_path: data/processed
+  allow_download: true
+  categories_limit: null
+  stores_limit: null
+  history_weeks: 104
+
+forecast:
+  horizon_weeks: 1
+  recursive_horizons: [1, 2, 3, 4]
+  lags: [1, 2, 3, 4, 8, 12, 52]
+  rolling_windows: [4, 8, 12]
+  rolling_std_windows: [4, 12]
+  embargo_weeks: 1
+
+models:
+  baseline:
+    seasonal_lag: 4
+  ridge:
+    alpha: 1.0
+  catboost:
+    iterations: 80
+    depth: 6
+    learning_rate: 0.08
+    loss_function: RMSE
+    verbose: false
+
+monitoring:
+  mape_warning_threshold: 0.25
+  mape_critical_threshold: 0.40
+  psi_warning_threshold: 0.10
+  psi_critical_threshold: 0.25
+
+text_features:
+  max_tfidf_features: 20
+  positive_words: ["выгода", "скидка", "подарок", "новинка", "лучший"]
+  negative_words: ["остатки", "распродажа", "срок", "возврат"]

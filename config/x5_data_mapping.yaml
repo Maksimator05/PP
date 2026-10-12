@@ -1,0 +1,30 @@
+files:
+  transactions:
+    patterns: ["transactions*.csv", "transactions*.parquet", "purchases*.csv", "purchases*.parquet"]
+  products:
+    patterns: ["products*.csv", "products*.parquet"]
+  clients:
+    patterns: ["clients*.csv", "clients*.parquet"]
+
+canonical_fields:
+  transaction_id: ["transaction_id", "receipt_id", "transaction_uid", "purchase_id", "bill_id"]
+  transaction_date: ["transaction_date", "date", "purchased_at", "transaction_datetime", "day"]
+  store_id: ["store_id", "shop_id", "store", "location_id"]
+  category_id: ["category_id", "level_2", "hierarchy_level_2", "product_category", "category"]
+  product_id: ["product_id", "sku", "item_id", "material"]
+  sales_amount: ["sales_amount", "amount", "revenue", "price", "net_sales"]
+  sales_quantity: ["sales_quantity", "quantity", "qty", "count"]
+  is_promo: ["is_promo", "promo", "promotion_flag", "discount_flag"]
+  promo_id: ["promo_id", "campaign_id", "offer_id"]
+
+aggregation:
+  date_column: transaction_date
+  week_start: Monday
+  group_by: ["store_id", "category_id", "week_start"]
+  sum_fields: ["sales_amount", "sales_quantity"]
+  max_fields: ["is_promo"]
+
+derived_fields:
+  missing_category_strategy: "use product_id hash buckets when product hierarchy is absent"
+  missing_store_strategy: "single synthetic store if source has no store identifier"
+  promo_text_strategy: "deterministic generator tied to promo flag and season"

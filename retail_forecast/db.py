@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import uuid
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import MetaData, Table, create_engine, delete, text
 from sqlalchemy.engine import Engine
 
 from retail_forecast.config import load_config
@@ -62,14 +62,38 @@ def upsert_like_replace(frame: pd.DataFrame, table_name: str, engine: Engine) ->
 
 def write_table(frame: pd.DataFrame, table_name: str, engine: Engine, if_exists: str = "replace") -> int:
     """Write a dataframe to SQL and return the number of rows written."""
-    frame.to_sql(table_name, engine, if_exists=if_exists, index=False)
+    if engine.url.get_backend_name() == "postgresql":
+        metadata = MetaData()
+        table = Table(table_name, metadata, autoload_with=engine)
+        columns = [column for column in frame.columns if column in table.c]
+        records = frame[columns].where(pd.notna(frame[columns]), None).to_dict(orient="records") if columns else []
+        with engine.begin() as connection:
+            if if_exists == "replace":
+                connection.execute(delete(table))
+            if records:
+                connection.execute(table.insert(), records)
+        return int(len(records))
+    raw_connection = engine.raw_connection()
+    try:
+        frame.to_sql(table_name, raw_connection, if_exists=if_exists, index=False)
+        raw_connection.commit()
+    finally:
+        raw_connection.close()
     return int(len(frame))
 
 
 def read_table(table_name: str, engine: Engine) -> pd.DataFrame:
     """Read a SQL table, returning an empty frame if the table is absent."""
     try:
-        return pd.read_sql_table(table_name, engine)
+        if engine.url.get_backend_name() == "postgresql":
+            with engine.connect() as connection:
+                result = connection.execute(text(f'SELECT * FROM "{table_name}"'))
+                return pd.DataFrame(result.mappings().all())
+        raw_connection = engine.raw_connection()
+        try:
+            return pd.read_sql_query(f'SELECT * FROM "{table_name}"', raw_connection)
+        finally:
+            raw_connection.close()
     except Exception:
         return pd.DataFrame()
 
@@ -101,7 +125,7 @@ def log_etl(engine: Engine, stage: str, status: str, rows_processed: int = 0, me
             }
         ]
     )
-    frame.to_sql("etl_logs", engine, if_exists="append", index=False)
+    write_table(frame, "etl_logs", engine, if_exists="append")
 
 
 def set_pipeline_state(engine: Engine, key: str, value: str, stage: str = "pipeline") -> None:

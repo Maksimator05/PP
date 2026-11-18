@@ -67,7 +67,33 @@ def generate_promo_texts(transactions: pd.DataFrame, seed: int = 42) -> pd.DataF
         template = PROMO_TEMPLATES[int(rng.integers(0, len(PROMO_TEMPLATES)))]
         texts.append(template.format(discount=discount, category=row.category_id))
     promo_rows["promo_text"] = texts
-    return promo_rows[["promo_id", "store_id", "category_id", "week_start", "promo_text"]]
+    promo_rows["source_name"] = "synthetic_fallback_promo_texts"
+    return promo_rows[["promo_id", "store_id", "category_id", "week_start", "promo_text", "source_name"]]
+
+
+def generate_promo_calendar(weekly_sales: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    """Create a separate, explicitly synthetic weakly structured promotion feed."""
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, object]] = []
+    for (store_id, category_id), series in weekly_sales.groupby(["store_id", "category_id"], sort=True):
+        series = series.sort_values("week_start").reset_index(drop=True)
+        for index, item in series.iterrows():
+            if (index + len(str(store_id)) + len(str(category_id))) % 8 != 0:
+                continue
+            discount = int(rng.choice([10, 15, 20, 25, 30]))
+            template = PROMO_TEMPLATES[int(rng.integers(0, len(PROMO_TEMPLATES)))]
+            week_start = pd.Timestamp(item["week_start"])
+            rows.append(
+                {
+                    "promo_id": f"calendar-{store_id}-{category_id}-{week_start.date().isoformat()}",
+                    "store_id": str(store_id),
+                    "category_id": str(category_id),
+                    "week_start": week_start.date().isoformat(),
+                    "promo_text": template.format(discount=discount, category=category_id),
+                    "source_name": "synthetic_promo_calendar",
+                }
+            )
+    return pd.DataFrame(rows, columns=["promo_id", "store_id", "category_id", "week_start", "promo_text", "source_name"])
 
 
 def write_synthetic_dataset(output_dir: Path, seed: int = 42) -> dict[str, Path]:

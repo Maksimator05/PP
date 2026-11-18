@@ -1,37 +1,36 @@
 # Архитектура
 
-Проект реализует локальный ML-контур для прогноза недельных продаж по товарным категориям. Основной источник - X5 RetailHero. Если публичные источники недоступны, создается явно помеченный синтетический fallback с той же канонической схемой.
+Проект прогнозирует недельные продажи товарных категорий в разрезе магазина и категории. Поток разделен на загрузку источников, проверку качества, хранение, подготовку признаков, обучение, расчет прогнозов и представление результатов.
 
 ```mermaid
 flowchart LR
-    A[HuggingFace / Kaggle / fallback] --> B[Raw layer: data/raw]
-    B --> C[Canonical loader]
-    C --> D[Data quality checks]
-    D --> E[PostgreSQL / processed CSV]
-    E --> F[Weekly aggregation]
-    G[Promo texts] --> H[Offline text features]
-    F --> I[Leakage-safe features]
-    H --> I
-    I --> J[Temporal validation]
-    J --> K[Naive / Ridge / CatBoost fallback]
-    K --> L[MLflow or local metrics]
-    K --> M[Forecast artifacts]
-    I --> N[Drift monitoring]
+    A[X5 RetailHero CSV / CSV.GZ] --> B[Raw files and mapping]
+    C[Promo descriptions CSV] --> D[Text feature extraction]
+    B --> E[Canonical loader]
+    E --> F[Quality checks]
+    F --> G[Weekly aggregation]
+    G --> H[SQLite or PostgreSQL]
+    G --> I[Leakage-safe feature pipeline]
+    D --> I
+    I --> J[Chronological train / validation / test]
+    J --> K[Naive, Ridge, HistGradientBoosting, Random Forest]
+    K --> L[Versioned model and experiment log]
+    K --> M[Forecasts, metrics, explanations]
+    M --> N[Drift monitoring]
     M --> O[Streamlit dashboard]
 ```
 
-## Сервисы
+## Поток обработки
 
-- `postgres`: хранит raw-транзакции, недельные агрегаты, промо-тексты, прогнозы, метрики и журналы.
-- `app`: выполняет загрузку, ETL, обучение и мониторинг.
-- `dashboard`: показывает факт, метрики, промо-недели и сравнение категорий.
+1. `downloader` находит локальные данные или загружает публичный набор X5; синтетический режим маркируется отдельно.
+2. `x5_loader` обрабатывает вложенные CSV и gzip, приводит названия полей к единой схеме и присоединяет категории товаров.
+3. `quality` проверяет обязательные поля и допустимость значений, сохраняя отказы в отдельный набор.
+4. `aggregation` формирует недельные ряды с понедельником в качестве начала недели. Запись выполняется через ключи и режим upsert.
+5. `features` строит лаги, скользящие агрегаты, календарные признаки и текстовые промо-признаки без использования будущих продаж.
+6. Временное разбиение отделяет обучение, подбор модели и окончательную оценку.
+7. `pipeline` создает прогнозы 1–4 недель, метрики, объяснения и отчеты о дрейфе.
+8. Streamlit показывает фактические продажи, прогнозы, качество и мониторинг.
 
-## Потоки данных
+## Хранение и сервисы
 
-1. `scripts/download_x5_dataset.py` проверяет локальные файлы и скачивает X5 RetailHero или создает fallback.
-2. `x5_loader` приводит разные исходные имена колонок к канонической схеме.
-3. `quality` отделяет проблемные записи.
-4. `aggregation` строит `weekly_sales` с неделей, начинающейся в понедельник.
-5. `features` создает лаги, rolling-признаки, календарь и текстовые промо-признаки без утечки.
-6. `models` обучает baseline, линейную модель и бустинг.
-7. `monitoring` считает PSI и метрики качества.
+Локальный режим использует SQLite и CSV-артефакты. Основной контейнерный режим задается `docker-compose.yml`: PostgreSQL хранит данные, приложение исполняет пайплайн, а Streamlit открывает дашборд. SQL-структура находится в `sql/001_schema.sql`. Контейнерный режим реализован, но в рамках этой проверки не запускался.

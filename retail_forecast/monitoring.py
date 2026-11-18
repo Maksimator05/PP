@@ -23,17 +23,25 @@ def population_stability_index(expected, current, bins: int = 10) -> float:
     if expected_values.size < 2 or current_values.size < 2:
         return 0.0
 
-    breakpoints = np.quantile(expected_values, np.linspace(0, 1, bins + 1))
-    breakpoints = np.unique(breakpoints)
-    if breakpoints.size < 2:
-        return 0.0
+    if np.ptp(expected_values) == 0:
+        center = expected_values[0]
+        cuts = np.array([center - 1e-9, center + 1e-9])
+    else:
+        cuts = np.unique(np.quantile(expected_values, np.linspace(0, 1, bins + 1)[1:-1]))
+        if cuts.size == 0:
+            cuts = np.array([float(np.min(expected_values)), float(np.max(expected_values))])
 
-    expected_counts = np.histogram(expected_values, bins=breakpoints)[0] / float(expected_values.size)
-    current_counts = np.histogram(current_values, bins=breakpoints)[0] / float(current_values.size)
+    # Digitizing with internal cut points keeps values beyond the reference range
+    # in underflow/overflow bins instead of silently dropping them.
+    n_bins = len(cuts) + 1
+    expected_counts = np.bincount(np.digitize(expected_values, cuts), minlength=n_bins).astype(float) / float(expected_values.size)
+    current_counts = np.bincount(np.digitize(current_values, cuts), minlength=n_bins).astype(float) / float(current_values.size)
 
     eps = 1e-4
     expected_counts = np.clip(expected_counts, eps, None)
     current_counts = np.clip(current_counts, eps, None)
+    expected_counts /= expected_counts.sum()
+    current_counts /= current_counts.sum()
 
     return float(np.sum((current_counts - expected_counts) * np.log(current_counts / expected_counts)))
 

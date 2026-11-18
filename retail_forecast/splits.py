@@ -17,6 +17,28 @@ def temporal_train_test_split(frame: pd.DataFrame, test_weeks: int = 8) -> tuple
     return train, test
 
 
+def temporal_train_validation_test_split(
+    frame: pd.DataFrame,
+    validation_weeks: int = 8,
+    test_weeks: int = 8,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Reserve the latest period as an untouched final test after validation."""
+    weeks = sorted(pd.to_datetime(frame["target_week"]).dropna().unique())
+    if len(weeks) < 3:
+        raise ValueError("At least three distinct target weeks are required for train/validation/test splitting")
+    test_count = min(test_weeks, max(1, len(weeks) // 4))
+    validation_count = min(validation_weeks, max(1, (len(weeks) - test_count) // 4))
+    test_start = weeks[-test_count]
+    validation_end = test_start
+    validation_start = weeks[max(1, len(weeks) - test_count - validation_count)]
+    train = frame[pd.to_datetime(frame["target_week"]) < validation_start].copy()
+    validation = frame[(pd.to_datetime(frame["target_week"]) >= validation_start) & (pd.to_datetime(frame["target_week"]) < validation_end)].copy()
+    test = frame[pd.to_datetime(frame["target_week"]) >= test_start].copy()
+    if train.empty or validation.empty or test.empty:
+        raise ValueError("Unable to create non-empty chronological train, validation and test periods")
+    return train, validation, test
+
+
 def rolling_splits(frame: pd.DataFrame, n_splits: int = 3, validation_weeks: int = 4, embargo_weeks: int = 1) -> list[tuple[pd.Index, pd.Index]]:
     """Create expanding-window splits with an embargo before validation."""
     weeks = sorted(pd.to_datetime(frame["target_week"]).dropna().unique())

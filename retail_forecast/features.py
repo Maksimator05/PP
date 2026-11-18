@@ -35,6 +35,9 @@ def build_features(
 
     frame["target_week"] = group["week_start"].shift(-horizon)
     frame["target_sales_amount"] = group["sales_amount"].shift(-horizon)
+    # Promotion information for the target week comes only from the separate,
+    # known-in-advance promo feed; it is not inferred from future sales rows.
+    frame["target_is_promo_week"] = 0
     frame["as_of_date"] = frame["week_start"]
     frame["weekofyear"] = frame["target_week"].dt.isocalendar().week.astype("float")
     frame["month"] = frame["target_week"].dt.month
@@ -42,12 +45,14 @@ def build_features(
     frame["is_holiday"] = frame["target_week"].dt.strftime("%m-%d").isin({"01-01", "01-07", "02-23", "03-08", "05-01", "05-09", "06-12", "11-04"}).astype(int)
     frame["store_code"] = frame["store_id"].astype("category").cat.codes
     frame["category_code"] = frame["category_id"].astype("category").cat.codes
-    frame["promo_x_holiday"] = frame["is_promo_week"].astype(int) * frame["is_holiday"]
     frame["category_x_month"] = frame["category_code"] * frame["month"]
 
     if promo_texts is not None and not promo_texts.empty:
         text_features = build_text_features(promo_texts)
-        frame = frame.merge(text_features, on=["store_id", "category_id", "week_start"], how="left")
+        text_features = text_features.rename(columns={"week_start": "target_week"})
+        frame = frame.merge(text_features, on=["store_id", "category_id", "target_week"], how="left")
+        frame["target_is_promo_week"] = frame["promo_text_len"].notna().astype(int)
+    frame["promo_x_holiday"] = frame["target_is_promo_week"] * frame["is_holiday"]
 
     numeric_columns = frame.select_dtypes(include=["number", "bool"]).columns
     frame[numeric_columns] = frame[numeric_columns].fillna(0)

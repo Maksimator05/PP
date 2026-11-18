@@ -53,8 +53,8 @@ demo-local:
 
 demo:
 	docker compose --profile core up -d
-	python scripts/run_demo.py
-	python scripts/db_counts.py
+	python scripts/run_demo.py --database-url postgresql+psycopg2://retail:retail@localhost:5432/retail_forecast
+	python scripts/db_counts.py --database-url postgresql+psycopg2://retail:retail@localhost:5432/retail_forecast
 
 all: demo-local test
 

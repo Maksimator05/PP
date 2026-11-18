@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import uuid
 
 import pandas as pd
-from sqlalchemy import MetaData, Table, create_engine, delete, text
+from sqlalchemy import Date, DateTime, MetaData, Table, create_engine, delete, text
 from sqlalchemy.engine import Engine
 
 from retail_forecast.config import load_config
@@ -61,25 +61,48 @@ def upsert_like_replace(frame: pd.DataFrame, table_name: str, engine: Engine) ->
 
 
 def write_table(frame: pd.DataFrame, table_name: str, engine: Engine, if_exists: str = "replace") -> int:
-    """Write a dataframe to SQL and return the number of rows written."""
-    if engine.url.get_backend_name() == "postgresql":
-        metadata = MetaData()
-        table = Table(table_name, metadata, autoload_with=engine)
-        columns = [column for column in frame.columns if column in table.c]
-        records = frame[columns].where(pd.notna(frame[columns]), None).to_dict(orient="records") if columns else []
-        with engine.begin() as connection:
-            if if_exists == "replace":
-                connection.execute(delete(table))
+    """Write rows while preserving schema and supporting stable-key upserts."""
+    metadata = MetaData()
+    table = Table(table_name, metadata, autoload_with=engine)
+    columns = [column.name for column in table.columns if column.name in frame.columns]
+    payload = frame[columns].copy() if columns else pd.DataFrame()
+    for column in columns:
+        column_type = table.c[column].type
+        if isinstance(column_type, DateTime):
+            parsed = pd.to_datetime(payload[column], errors="coerce")
+            payload[column] = parsed.map(lambda value: value.to_pydatetime() if pd.notna(value) else None)
+        elif isinstance(column_type, Date):
+            parsed = pd.to_datetime(payload[column], errors="coerce")
+            payload[column] = parsed.map(lambda value: value.date() if pd.notna(value) else None)
+    records = payload.astype(object).where(pd.notna(payload), None).to_dict(orient="records") if columns else []
+    primary_keys = [column.name for column in table.primary_key.columns]
+
+    with engine.begin() as connection:
+        if if_exists == "replace":
+            connection.execute(delete(table))
             if records:
                 connection.execute(table.insert(), records)
-        return int(len(records))
-    raw_connection = engine.raw_connection()
-    try:
-        frame.to_sql(table_name, raw_connection, if_exists=if_exists, index=False)
-        raw_connection.commit()
-    finally:
-        raw_connection.close()
-    return int(len(frame))
+        elif if_exists == "append":
+            if records:
+                connection.execute(table.insert(), records)
+        elif if_exists == "upsert":
+            if not primary_keys:
+                raise ValueError(f"Table {table_name} must have a primary key for upsert")
+            if records:
+                backend = engine.url.get_backend_name()
+                if backend == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                elif backend == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
+                else:
+                    raise ValueError(f"Upsert is not implemented for database backend: {backend}")
+                statement = dialect_insert(table).values(records)
+                updates = {column: getattr(statement.excluded, column) for column in columns if column not in primary_keys}
+                statement = statement.on_conflict_do_update(index_elements=primary_keys, set_=updates) if updates else statement.on_conflict_do_nothing(index_elements=primary_keys)
+                connection.execute(statement)
+        else:
+            raise ValueError(f"Unsupported write mode: {if_exists}")
+    return int(len(records))
 
 
 def read_table(table_name: str, engine: Engine) -> pd.DataFrame:
@@ -89,11 +112,8 @@ def read_table(table_name: str, engine: Engine) -> pd.DataFrame:
             with engine.connect() as connection:
                 result = connection.execute(text(f'SELECT * FROM "{table_name}"'))
                 return pd.DataFrame(result.mappings().all())
-        raw_connection = engine.raw_connection()
-        try:
-            return pd.read_sql_query(f'SELECT * FROM "{table_name}"', raw_connection)
-        finally:
-            raw_connection.close()
+        with engine.connect() as connection:
+            return pd.read_sql_query(text(f'SELECT * FROM "{table_name}"'), connection)
     except Exception:
         return pd.DataFrame()
 
@@ -130,10 +150,5 @@ def log_etl(engine: Engine, stage: str, status: str, rows_processed: int = 0, me
 
 def set_pipeline_state(engine: Engine, key: str, value: str, stage: str = "pipeline") -> None:
     """Upsert a simple pipeline state key/value."""
-    current = read_table("pipeline_state", engine)
     row = pd.DataFrame([{"state_key": key, "state_value": value, "stage": stage, "updated_at": datetime.now(timezone.utc).isoformat()}])
-    if current.empty or "state_key" not in current:
-        write_table(row, "pipeline_state", engine)
-        return
-    current = current[current["state_key"] != key]
-    write_table(pd.concat([current, row], ignore_index=True), "pipeline_state", engine)
+    write_table(row, "pipeline_state", engine, if_exists="upsert")

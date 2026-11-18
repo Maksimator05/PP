@@ -9,12 +9,15 @@ from typing import Callable
 
 import pandas as pd
 
-from retail_forecast.config import PROJECT_ROOT, load_config, project_path, read_env_file
+from retail_forecast.config import load_config, project_path, read_env_file
 from retail_forecast.logging_utils import setup_logger
 from retail_forecast.synthetic import write_synthetic_dataset
 
 
-EXPECTED_COLUMNS = {"transaction_date", "store_id", "category_id", "sales_amount", "sales_quantity"}
+DATE_ALIASES = {"transaction_date", "date", "purchased_at", "transaction_datetime", "day"}
+PRODUCT_ALIASES = {"product_id", "sku", "item_id", "material"}
+CATEGORY_ALIASES = {"category_id", "product_category", "level_2", "level_3", "level_1", "category"}
+AMOUNT_ALIASES = {"sales_amount", "line_amount", "amount", "revenue", "line_total", "net_sales", "trn_sum_from_iss", "trn_sum_from_red", "purchase_sum"}
 
 
 @dataclass(frozen=True)
@@ -32,15 +35,27 @@ def has_valid_dataset(path: Path) -> bool:
     """Return True when a usable transaction file already exists."""
     if not path.exists():
         return False
-    candidates = list(path.glob("transactions*.csv")) + list(path.glob("*.parquet"))
+    candidates = (
+        list(path.rglob("transactions*.csv"))
+        + list(path.rglob("transactions*.csv.gz"))
+        + list(path.rglob("transactions*.parquet"))
+        + list(path.rglob("purchases*.csv"))
+        + list(path.rglob("purchases*.csv.gz"))
+        + list(path.rglob("purchases*.parquet"))
+    )
     for candidate in candidates:
         try:
-            if candidate.suffix == ".csv":
-                sample = pd.read_csv(candidate, nrows=20)
-            else:
+            if candidate.name.lower().endswith((".csv", ".csv.gz")):
+                sample = pd.read_csv(candidate, nrows=20, compression="infer", low_memory=False)
+            elif candidate.suffix.lower() == ".parquet":
                 sample = pd.read_parquet(candidate)
+            else:
+                continue
             normalized = {column.lower() for column in sample.columns}
-            if EXPECTED_COLUMNS.issubset(normalized) or {"client_id", "transaction_id"}.intersection(normalized):
+            has_date = bool(normalized & DATE_ALIASES)
+            has_amount = bool(normalized & AMOUNT_ALIASES)
+            has_product_dimension = bool(normalized & (PRODUCT_ALIASES | CATEGORY_ALIASES))
+            if has_date and has_amount and has_product_dimension:
                 return True
         except Exception:
             continue
@@ -98,18 +113,17 @@ def ensure_dataset(force: bool = False) -> DatasetStatus:
     synthetic_path = project_path(config["data"].get("synthetic_path", "data/raw/x5_retailhero_synthetic"))
     data_source = str(config["data"].get("source", "synthetic")).lower()
 
-    if has_valid_dataset(x5_path):
-        logger.info("Existing dataset is valid: %s", x5_path)
+    if data_source == "x5" and has_valid_dataset(x5_path):
+        logger.info("Existing X5 dataset is valid: %s", x5_path)
         return DatasetStatus(x5_path, "x5_retailhero_local", False, _count_rows(x5_path), "Existing dataset reused")
-    if data_source == "x5" and not force:
-        message = f"DATA_SOURCE=x5 but no readable X5 files found in {x5_path}; synthetic fallback is blocked"
-        logger.error(message)
-        raise FileNotFoundError(message)
-    if not force and has_valid_dataset(synthetic_path):
+    if data_source != "x5" and not force and has_valid_dataset(synthetic_path):
         logger.info("Existing synthetic fallback is valid: %s", synthetic_path)
         return DatasetStatus(synthetic_path, "existing_synthetic_fallback", True, _count_rows(synthetic_path), "Existing synthetic fallback reused")
 
-    if config["data"].get("allow_download", True):
+    # A synthetic demo is deliberately offline. Network downloads happen only for
+    # the explicit X5 mode or when the download command is forced.
+    should_download = data_source == "x5" or force
+    if should_download and config["data"].get("allow_download", True):
         dataset_id = env.get("X5_HF_DATASET_ID", "pytorch-lifestream/retailhero-uplift")
         for source_name, attempt in [
             ("huggingface", lambda: try_huggingface_download(dataset_id, x5_path)),
@@ -123,7 +137,7 @@ def ensure_dataset(force: bool = False) -> DatasetStatus:
                     return DatasetStatus(x5_path, source_name, False, rows, f"Downloaded from {source_name}")
             except Exception as exc:
                 logger.warning("%s source failed: %s", source_name, exc)
-    else:
+    elif should_download:
         logger.info("Download disabled by configuration")
 
     if data_source == "x5":
@@ -133,14 +147,6 @@ def ensure_dataset(force: bool = False) -> DatasetStatus:
 
     logger.error("All public sources unavailable; creating explicit synthetic fallback")
     files = write_synthetic_dataset(synthetic_path, seed=int(config["project"]["random_seed"]))
-    assumptions = PROJECT_ROOT / "docs" / "assumptions.md"
-    assumptions.parent.mkdir(parents=True, exist_ok=True)
-    if not assumptions.exists():
-        assumptions.write_text("# Допущения\n\n", encoding="utf-8")
-    marker = "- Использован синтетический fallback, потому что публичные источники X5 недоступны в текущей среде.\n"
-    text = assumptions.read_text(encoding="utf-8")
-    if marker not in text:
-        assumptions.write_text(text.rstrip() + "\n" + marker, encoding="utf-8")
     rows = len(pd.read_csv(files["transactions"]))
     return DatasetStatus(synthetic_path, "synthetic_fallback", True, rows, "Synthetic fallback generated")
 
@@ -155,7 +161,18 @@ def verify_x5_dataset() -> DatasetStatus:
 
 
 def _count_rows(path: Path) -> int:
-    candidates = list(path.glob("transactions*.csv"))
-    if not candidates:
-        return 0
-    return sum(len(pd.read_csv(candidate, usecols=[0])) for candidate in candidates)
+    candidates = (
+        list(path.rglob("transactions*.csv"))
+        + list(path.rglob("transactions*.csv.gz"))
+        + list(path.rglob("transactions*.parquet"))
+        + list(path.rglob("purchases*.csv"))
+        + list(path.rglob("purchases*.csv.gz"))
+        + list(path.rglob("purchases*.parquet"))
+    )
+    total = 0
+    for candidate in candidates:
+        if candidate.name.lower().endswith((".csv", ".csv.gz")):
+            total += sum(len(chunk) for chunk in pd.read_csv(candidate, usecols=[0], compression="infer", chunksize=500_000))
+        elif candidate.suffix.lower() == ".parquet":
+            total += len(pd.read_parquet(candidate))
+    return total

@@ -21,10 +21,11 @@ def validate_transactions(transactions: pd.DataFrame) -> tuple[pd.DataFrame, pd.
     for idx in transactions.index[invalid_date]:
         issue_types[idx] = "invalid_or_missing_date"
     checks &= ~invalid_date
-    empty_category = transactions["category_id"].astype(str).str.strip().eq("")
-    for idx in transactions.index[empty_category]:
-        issue_types[idx] = "empty_category"
-    checks &= ~empty_category
+    for column in ("store_id", "category_id"):
+        empty_value = transactions[column].astype(str).str.strip().eq("")
+        for idx in transactions.index[empty_value]:
+            issue_types[idx] = f"empty_{column}"
+        checks &= ~empty_value
     negative = (transactions["sales_amount"] < 0) | (transactions["sales_quantity"] < 0)
     for idx in transactions.index[negative]:
         issue_types[idx] = "negative_sales"

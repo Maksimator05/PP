@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS promo_texts_raw (
     category_id TEXT NOT NULL,
     week_start DATE NOT NULL,
     promo_text TEXT NOT NULL,
+    source_name TEXT NOT NULL DEFAULT 'unknown',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -133,4 +134,16 @@ CREATE TABLE IF NOT EXISTS monitoring_alerts (
     metric_value NUMERIC(14, 6),
     threshold_value NUMERIC(14, 6),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS feature_importance (
+    feature TEXT PRIMARY KEY,
+    model_native_importance NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    permutation_importance_validation NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    permutation_std_validation NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    permutation_importance_test NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    permutation_std_test NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    validation_rank INTEGER,
+    test_rank INTEGER,
+    rank_change INTEGER
 );

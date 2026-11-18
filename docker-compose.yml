@@ -20,9 +20,8 @@ services:
   app:
     build: .
     profiles: ["full"]
-    env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://retail:retail@postgres:5432/retail_forecast
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-retail}:${POSTGRES_PASSWORD:-retail}@postgres:5432/${POSTGRES_DB:-retail_forecast}
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,9 +32,8 @@ services:
   dashboard:
     build: .
     profiles: ["full"]
-    env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://retail:retail@postgres:5432/retail_forecast
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-retail}:${POSTGRES_PASSWORD:-retail}@postgres:5432/${POSTGRES_DB:-retail_forecast}
     depends_on:
       postgres:
         condition: service_healthy

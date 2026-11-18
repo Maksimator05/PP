@@ -60,31 +60,50 @@ def make_catboost_or_fallback(random_seed: int = 42) -> Any:
         return HistGradientBoostingRegressor(max_iter=100, learning_rate=0.08, random_state=random_seed)
 
 
-def train_all_models(train: pd.DataFrame, test: pd.DataFrame, random_seed: int = 42, features: list[str] | None = None) -> list[ModelResult]:
-    """Train baseline, linear and boosting models."""
+def train_all_models(
+    train: pd.DataFrame,
+    validation: pd.DataFrame,
+    random_seed: int = 42,
+    features: list[str] | None = None,
+    test: pd.DataFrame | None = None,
+) -> list[ModelResult]:
+    """Compare candidates on validation, then evaluate refit candidates on a final holdout."""
     columns = features or feature_columns(train)
     x_train, y_train = train[columns], train["target_sales_amount"]
-    x_test, y_test = test[columns], test["target_sales_amount"]
-    models: dict[str, tuple[Any, dict[str, Any]]] = {
-        "seasonal_naive": (SeasonalNaiveRegressor(), {"lag_column": "sales_amount_lag_4"}),
-        "ridge": (Pipeline([("scale", StandardScaler()), ("model", Ridge(alpha=1.0))]), {"alpha": 1.0}),
-        "catboost_or_histgb": (make_catboost_or_fallback(random_seed), {"iterations_or_max_iter": 80, "learning_rate": 0.08}),
-        "random_forest_optional": (RandomForestRegressor(n_estimators=60, max_depth=8, random_state=random_seed, n_jobs=1), {"n_estimators": 60, "max_depth": 8}),
+    x_validation, y_validation = validation[columns], validation["target_sales_amount"]
+    evaluation = test if test is not None else validation
+    x_evaluation, y_evaluation = evaluation[columns], evaluation["target_sales_amount"]
+    candidate_factories = {
+        "seasonal_naive": (lambda: SeasonalNaiveRegressor(), {"lag_column": "sales_amount_lag_4"}),
+        "ridge": (lambda: Pipeline([("scale", StandardScaler()), ("model", Ridge(alpha=1.0))]), {"alpha": 1.0}),
+        "catboost_or_histgb": (lambda: make_catboost_or_fallback(random_seed), {"iterations_or_max_iter": 80, "learning_rate": 0.08}),
+        "random_forest_optional": (lambda: RandomForestRegressor(n_estimators=60, max_depth=8, random_state=random_seed, n_jobs=1), {"n_estimators": 60, "max_depth": 8}),
     }
     results: list[ModelResult] = []
-    for name, (model, params) in models.items():
+    for name, (factory, params) in candidate_factories.items():
         started = time.perf_counter()
-        model.fit(x_train, y_train)
+        validation_model = factory()
+        validation_model.fit(x_train, y_train)
+        validation_predictions = pd.Series(validation_model.predict(x_validation), index=validation.index).clip(lower=0)
+        validation_metrics = evaluate(y_validation, validation_predictions)
+
+        if test is None:
+            model = validation_model
+        else:
+            model = factory()
+            final_training = pd.concat([train, validation]).sort_values("target_week")
+            model.fit(final_training[columns], final_training["target_sales_amount"])
+        evaluation_predictions = pd.Series(model.predict(x_evaluation), index=evaluation.index).clip(lower=0)
+        metrics = evaluate(y_evaluation, evaluation_predictions)
         train_seconds = time.perf_counter() - started
-        predictions = pd.Series(model.predict(x_test), index=test.index).clip(lower=0)
-        metrics = evaluate(y_test, predictions)
-        results.append(ModelResult(name=name, model=model, metrics=metrics, features=columns, params=params, train_seconds=train_seconds, validation_metrics=metrics))
+        effective_params = {**params, "estimator": type(model).__name__}
+        results.append(ModelResult(name=name, model=model, metrics=metrics, features=columns, params=effective_params, train_seconds=train_seconds, validation_metrics=validation_metrics))
     return results
 
 
 def select_best(results: list[ModelResult], metric: str = "WAPE") -> ModelResult:
-    """Select the model with the smallest error metric."""
-    return min(results, key=lambda result: result.metrics[metric])
+    """Select the model with the smallest validation error, never the final test score."""
+    return min(results, key=lambda result: result.validation_metrics[metric])
 
 
 def save_model(result: ModelResult, output_dir: Path) -> Path:
@@ -92,10 +111,10 @@ def save_model(result: ModelResult, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{result.name}.pkl"
     with path.open("wb") as file:
-        pickle.dump({"model": result.model, "features": result.features, "metrics": result.metrics, "params": result.params}, file)
+        pickle.dump({"model": result.model, "features": result.features, "metrics": result.metrics, "validation_metrics": result.validation_metrics, "params": result.params}, file)
     latest = output_dir / "best_model.pkl"
     with latest.open("wb") as file:
-        pickle.dump({"model": result.model, "features": result.features, "metrics": result.metrics, "params": result.params, "name": result.name}, file)
+        pickle.dump({"model": result.model, "features": result.features, "metrics": result.metrics, "validation_metrics": result.validation_metrics, "params": result.params, "name": result.name}, file)
     return path
 
 
